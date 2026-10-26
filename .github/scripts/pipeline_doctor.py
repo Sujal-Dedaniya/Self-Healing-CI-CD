@@ -19,9 +19,24 @@ except ImportError:
     sys.exit(1)
 
 
-def run_command(cmd: List[str], check: bool = False) -> subprocess.CompletedProcess:
-    """Helper to run a shell command safely."""
-    return subprocess.run(cmd, capture_output=True, text=True, check=check)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+
+
+def run_command(cmd: List[str], check: bool = False, timeout: int = 60) -> subprocess.CompletedProcess:
+    """Helper to run a shell command safely without hanging."""
+    try:
+        return subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=check,
+            timeout=timeout
+        )
+    except subprocess.TimeoutExpired as e:
+        print(f"⚠️ Command timed out after {timeout}s: {' '.join(cmd)}")
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=str(e))
 
 
 def read_log_file(log_path: str) -> str:
@@ -164,13 +179,14 @@ def create_pr_or_commit(analysis: str, modified_files: List[str], branch_name: s
 ---
 *Generated autonomously by **Pipeline Doctor** via Google Gemini API.*
 """
+        repo_arg = ["--repo", repo] if repo else []
         gh_res = run_command([
             "gh", "pr", "create",
             "--title", pr_title,
             "--body", pr_body,
             "--head", fix_branch,
-            "--base", branch_name
-        ])
+            "--base", branch_name,
+        ] + repo_arg)
         if gh_res.returncode == 0:
             print(f"🎉 Created Self-Healing Pull Request: {gh_res.stdout.strip()}")
         else:
@@ -180,8 +196,11 @@ def create_pr_or_commit(analysis: str, modified_files: List[str], branch_name: s
         print(f"📌 Committing fix directly to '{branch_name}'...")
         run_command(["git", "add"] + modified_files)
         run_command(["git", "commit", "-m", f"fix(ci): autonomous self-healing fix\n\n{analysis}"])
-        run_command(["git", "push", "origin", branch_name])
-        print("🚀 Pushed self-healing commit directly to branch.")
+        push_res = run_command(["git", "push", "origin", f"HEAD:{branch_name}"])
+        if push_res.returncode == 0:
+            print(f"🚀 Pushed self-healing commit directly to '{branch_name}'.")
+        else:
+            print(f"Push failed: {push_res.stderr.strip() or push_res.stdout.strip()}")
 
 
 def main():
