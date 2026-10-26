@@ -1,0 +1,68 @@
+name: CI with Self-Healing
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  build-and-heal:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Node Dependencies
+        run: npm ci
+
+      - name: Install Python Dependencies
+        run: pip install -r .github/scripts/requirements.txt
+
+      # Step 1: Run the standard build & test
+      - name: Run Build
+        id: build_step
+        run: |
+          npm run build 2>&1 | tee build_output.log
+        continue-on-error: true
+
+      # Step 2: Autonomous Self-Healing via Google Gemini (Only runs on failure)
+      - name: Autonomous Self-Healing with Gemini
+        if: steps.build_step.outcome == 'failure'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🚨 Build failed! Triggering Gemini Self-Healing Agent..."
+          python3 .github/scripts/pipeline_doctor.py \
+            --log-file build_output.log \
+            --build-cmd "npm run build" \
+            --branch "${{ github.head_ref || github.ref_name }}" \
+            --mode pr
+
+      # Step 3: Ensure pipeline reflects original failure status
+      - name: Check Final Status
+        if: steps.build_step.outcome == 'failure'
+        run: |
+          echo "Original build failed. An automated self-healing fix branch/PR has been dispatched."
+          exit 1
