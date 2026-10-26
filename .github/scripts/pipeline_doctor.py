@@ -62,7 +62,7 @@ def get_git_diff() -> str:
 
 def ask_gemini_for_fix(error_log: str, git_diff: str, api_key: str) -> Optional[dict]:
     """Invoke Gemini API to diagnose and propose file fixes."""
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=api_key, http_options={'timeout': 60000})
 
     prompt = f"""
 You are an expert CI/CD self-healing agent. A software build failed in the CI/CD pipeline.
@@ -98,6 +98,10 @@ INSTRUCTIONS:
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=0.2,
+                thinking_config=types.ThinkingConfig(
+                    thinking_level="low"
+                ),
+                max_output_tokens=4096,
             ),
         )
 
@@ -130,13 +134,24 @@ def apply_fixes(files: List[Dict[str, str]]) -> List[str]:
 def verify_build(build_cmd: str) -> bool:
     """Run verification in the current environment to ensure the patch works."""
     print(f"🧪 Verifying patch with '{build_cmd}'...")
-    res = subprocess.run(build_cmd, shell=True, capture_output=True, text=True)
-    if res.returncode == 0:
-        print("✅ Verification PASSED! The build succeeded with the patch.")
-        return True
-    else:
-        print("❌ Verification FAILED. The patch did not resolve the issue.")
-        print("Verification Output Tail:\n", res.stderr[-1000:] or res.stdout[-1000:])
+    try:
+        res = subprocess.run(
+            build_cmd,
+            shell=True,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        if res.returncode == 0:
+            print("✅ Verification PASSED! The build succeeded with the patch.")
+            return True
+        else:
+            print("❌ Verification FAILED. The patch did not resolve the issue.")
+            print("Verification Output Tail:\n", res.stderr[-1000:] or res.stdout[-1000:])
+            return False
+    except subprocess.TimeoutExpired:
+        print(f"❌ Verification timed out after 60s.")
         return False
 
 
