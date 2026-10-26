@@ -18,6 +18,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.head_ref || github.ref_name }}
           fetch-depth: 0
 
       - name: Setup Node.js
@@ -41,7 +42,9 @@ jobs:
       # Step 1: Run the standard build & test
       - name: Run Build
         id: build_step
+        shell: bash
         run: |
+          set -o pipefail
           npm run build 2>&1 | tee build_output.log
         continue-on-error: true
 

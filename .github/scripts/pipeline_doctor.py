@@ -130,6 +130,11 @@ def create_pr_or_commit(analysis: str, modified_files: List[str], branch_name: s
     run_command(["git", "config", "user.name", "github-actions[bot]"])
     run_command(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"])
 
+    gh_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    if gh_token and repo:
+        run_command(["git", "remote", "set-url", "origin", f"https://x-access-token:{gh_token}@github.com/{repo}.git"])
+
     fix_branch = f"auto-fix/ci-{os.environ.get('GITHUB_RUN_ID', 'local')}"
 
     if mode == "pr":
