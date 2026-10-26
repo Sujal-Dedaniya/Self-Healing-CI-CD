@@ -19,9 +19,24 @@ except ImportError:
     sys.exit(1)
 
 
-def run_command(cmd: List[str], check: bool = False) -> subprocess.CompletedProcess:
-    """Helper to run a shell command safely."""
-    return subprocess.run(cmd, capture_output=True, text=True, check=check)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+
+
+def run_command(cmd: List[str], check: bool = False, timeout: int = 60) -> subprocess.CompletedProcess:
+    """Helper to run a shell command safely without hanging."""
+    try:
+        return subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=check,
+            timeout=timeout
+        )
+    except subprocess.TimeoutExpired as e:
+        print(f"⚠️ Command timed out after {timeout}s: {' '.join(cmd)}")
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=str(e))
 
 
 def read_log_file(log_path: str) -> str:
@@ -47,7 +62,7 @@ def get_git_diff() -> str:
 
 def ask_gemini_for_fix(error_log: str, git_diff: str, api_key: str) -> Optional[dict]:
     """Invoke Gemini API to diagnose and propose file fixes."""
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=api_key, http_options={'timeout': 60000})
 
     prompt = f"""
 You are an expert CI/CD self-healing agent. A software build failed in the CI/CD pipeline.
@@ -75,14 +90,18 @@ INSTRUCTIONS:
 }}
 """
 
-    print("🤖 Consulting Gemini (gemini-2.5-flash) for diagnosis and patch...")
+    print("🤖 Consulting Gemini (gemini-3.8-flash) for diagnosis and patch...")
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=0.2,
+                thinking_config=types.ThinkingConfig(
+                    thinking_level="low"
+                ),
+                max_output_tokens=4096,
             ),
         )
 
@@ -115,13 +134,24 @@ def apply_fixes(files: List[Dict[str, str]]) -> List[str]:
 def verify_build(build_cmd: str) -> bool:
     """Run verification in the current environment to ensure the patch works."""
     print(f"🧪 Verifying patch with '{build_cmd}'...")
-    res = subprocess.run(build_cmd, shell=True, capture_output=True, text=True)
-    if res.returncode == 0:
-        print("✅ Verification PASSED! The build succeeded with the patch.")
-        return True
-    else:
-        print("❌ Verification FAILED. The patch did not resolve the issue.")
-        print("Verification Output Tail:\n", res.stderr[-1000:] or res.stdout[-1000:])
+    try:
+        res = subprocess.run(
+            build_cmd,
+            shell=True,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        if res.returncode == 0:
+            print("✅ Verification PASSED! The build succeeded with the patch.")
+            return True
+        else:
+            print("❌ Verification FAILED. The patch did not resolve the issue.")
+            print("Verification Output Tail:\n", res.stderr[-1000:] or res.stdout[-1000:])
+            return False
+    except subprocess.TimeoutExpired:
+        print(f"❌ Verification timed out after 60s.")
         return False
 
 
@@ -129,6 +159,11 @@ def create_pr_or_commit(analysis: str, modified_files: List[str], branch_name: s
     """Commit and either open a Pull Request or push directly."""
     run_command(["git", "config", "user.name", "github-actions[bot]"])
     run_command(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"])
+
+    gh_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    if gh_token and repo:
+        run_command(["git", "remote", "set-url", "origin", f"https://x-access-token:{gh_token}@github.com/{repo}.git"])
 
     fix_branch = f"auto-fix/ci-{os.environ.get('GITHUB_RUN_ID', 'local')}"
 
@@ -159,13 +194,14 @@ def create_pr_or_commit(analysis: str, modified_files: List[str], branch_name: s
 ---
 *Generated autonomously by **Pipeline Doctor** via Google Gemini API.*
 """
+        repo_arg = ["--repo", repo] if repo else []
         gh_res = run_command([
             "gh", "pr", "create",
             "--title", pr_title,
             "--body", pr_body,
             "--head", fix_branch,
-            "--base", branch_name
-        ])
+            "--base", branch_name,
+        ] + repo_arg)
         if gh_res.returncode == 0:
             print(f"🎉 Created Self-Healing Pull Request: {gh_res.stdout.strip()}")
         else:
@@ -175,8 +211,11 @@ def create_pr_or_commit(analysis: str, modified_files: List[str], branch_name: s
         print(f"📌 Committing fix directly to '{branch_name}'...")
         run_command(["git", "add"] + modified_files)
         run_command(["git", "commit", "-m", f"fix(ci): autonomous self-healing fix\n\n{analysis}"])
-        run_command(["git", "push", "origin", branch_name])
-        print("🚀 Pushed self-healing commit directly to branch.")
+        push_res = run_command(["git", "push", "origin", f"HEAD:{branch_name}"])
+        if push_res.returncode == 0:
+            print(f"🚀 Pushed self-healing commit directly to '{branch_name}'.")
+        else:
+            print(f"Push failed: {push_res.stderr.strip() or push_res.stdout.strip()}")
 
 
 def main():
